@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+mode=""
+
+usage() {
+    echo "usage: $0 [-m mode] <directory>"
+    echo "  -m mode   stretch|fill|fit|center|tile|solid_color"
+    echo ""
+    echo "Sets a random image from <directory> (recursive) as wallpaper."
+    exit 1
+}
+
+dir=""
+
+while getopts "m:h" opt; do
+    case $opt in
+        m) mode="-m $OPTARG" ;;
+        *) usage ;;
+    esac
+done
+
+shift $((OPTIND - 1))
+dir="${1:-}"
+
+[ -n "$dir" ] || usage
+[ -d "$dir" ] || { echo "error: not a directory: $dir"; exit 1; }
+
+exts=(-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o \
+      -iname '*.bmp' -o -iname '*.tiff' -o -iname '*.tif' -o -iname '*.webp' -o \
+      -iname '*.svg' -o -iname '*.avif')
+
+# shellcheck disable=SC2207
+while IFS= read -r -d '' img; do
+    imgs+=("$img")
+done < <(find "$dir" -type f \( "${exts[@]}" \) -print0 2>/dev/null)
+
+[ "${#imgs[@]}" -gt 0 ] || { echo "error: no images found in $dir"; exit 1; }
+
+pick="${imgs[RANDOM % ${#imgs[@]}]}"
+
+"$(dirname "$0")/wallpaper" $mode "$pick"

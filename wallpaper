@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+mode="fill"
+
+usage() {
+    echo "usage: $0 [-m mode] <image>"
+    echo "  -m mode   stretch|fill|fit|center|tile|solid_color (default: $mode)"
+    exit 1
+}
+
+while getopts "m:h" opt; do
+    case $opt in
+        m) mode="$OPTARG" ;;
+        *) usage ;;
+    esac
+done
+
+shift $((OPTIND - 1))
+img="${1:-}"
+
+[ -n "$img" ] || usage
+[ -f "$img" ] || { echo "error: file not found: $img"; exit 1; }
+
+case "$mode" in
+    stretch|fill|fit|center|tile|solid_color) ;;
+    *) echo "error: invalid mode: $mode"; exit 1 ;;
+esac
+
+pkill swaybg 2>/dev/null || true
+swaybg -i "$img" -m "$mode" &
+disown $!

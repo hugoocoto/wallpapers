@@ -3,30 +3,51 @@
 set -euo pipefail
 
 mode="fill"
+randir=""
 
 usage() {
-    echo "usage: $0 [-m mode] <image>"
-    echo "  -m mode   stretch|fill|fit|center|tile|solid_color (default: $mode)"
+    echo "usage: $0 [-m mode] [-r <dir>] [<image>]"
+    echo "  -m mode   stretch|fill|fit|center|tile|solid_color (default: fill)"
+    echo "  -r <dir>  pick random image from directory (recursive)"
+    echo "  <image>   path to image file"
     exit 1
 }
 
-while getopts "m:h" opt; do
+while getopts "m:r:h" opt; do
     case $opt in
         m) mode="$OPTARG" ;;
+        r) randir="$OPTARG" ;;
         *) usage ;;
     esac
 done
 
 shift $((OPTIND - 1))
-img="${1:-}"
-
-[ -n "$img" ] || usage
-[ -f "$img" ] || { echo "error: file not found: $img"; exit 1; }
 
 case "$mode" in
     stretch|fill|fit|center|tile|solid_color) ;;
     *) echo "error: invalid mode: $mode"; exit 1 ;;
 esac
+
+if [ -n "$randir" ]; then
+    [ -d "$randir" ] || { echo "error: not a directory: $randir"; exit 1; }
+    [ $# -eq 0 ] || { echo "error: cannot use -r and a file argument together"; exit 1; }
+
+    exts=(-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o \
+          -iname '*.bmp' -o -iname '*.tiff' -o -iname '*.tif' -o -iname '*.webp' -o \
+          -iname '*.svg' -o -iname '*.avif')
+
+    imgs=()
+    while IFS= read -r -d '' img; do
+        imgs+=("$img")
+    done < <(find "$randir" -type f \( "${exts[@]}" \) -print0 2>/dev/null)
+
+    [ "${#imgs[@]}" -gt 0 ] || { echo "error: no images found in $randir"; exit 1; }
+    img="${imgs[RANDOM % ${#imgs[@]}]}"
+else
+    img="${1:-}"
+    [ -n "$img" ] || usage
+    [ -f "$img" ] || { echo "error: file not found: $img"; exit 1; }
+fi
 
 pkill swaybg 2>/dev/null || true
 swaybg -i "$img" -m "$mode" &

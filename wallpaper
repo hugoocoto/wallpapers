@@ -1,26 +1,44 @@
 #!/usr/bin/env bash
+#
+# Sets/rotates wallpapers via awww (https://codeberg.org/LGFae/awww), which keeps a
+# persistent daemon and animates transitions, instead of swaybg's hard pkill+relaunch cuts.
 
 set -euo pipefail
 
 mode="fill"
 randir=""
 interval=60
-pidfile="${XDG_RUNTIME_DIR:-/tmp}/wallpaper-rotate.pid"
+ttype="fade"
+tduration=1
+tfps=60
+stop_only=0
+
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+pidfile="$runtime_dir/wallpaper-rotate.pid"
+lockfile="$runtime_dir/wallpaper-rotate.lock"
 
 usage() {
-    echo "usage: $0 [-m mode] [-r <dir>] [-t <seconds>] [<image>]"
-    echo "  -m mode      stretch|fill|fit|center|tile|solid_color (default: fill)"
-    echo "  -r <dir>     rotate through random images from directory (recursive)"
-    echo "  -t <seconds> rotation interval (default: 60; <= 0 disables rotation, sets once)"
-    echo "  <image>      path to image file"
+    cat <<EOF
+usage: $0 [-m mode] [-r <dir>] [-t <seconds>] [-T <transition>] [-d <seconds>] [-k] [<image>]
+  -m mode      fill|fit|stretch|center (default: fill)
+  -r <dir>     rotate through random images from directory (recursive)
+  -t <seconds> rotation interval (default: 60; <= 0 disables rotation, sets once)
+  -T <type>    transition: fade|simple|wipe|wave|grow|outer|center|any|random|none (default: fade)
+  -d <seconds> transition duration in seconds (default: 1)
+  -k           stop any running rotation and exit
+  <image>      path to image file
+EOF
     exit 1
 }
 
-while getopts "m:r:t:h" opt; do
+while getopts "m:r:t:T:d:kh" opt; do
     case $opt in
         m) mode="$OPTARG" ;;
         r) randir="$OPTARG" ;;
         t) interval="$OPTARG" ;;
+        T) ttype="$OPTARG" ;;
+        d) tduration="$OPTARG" ;;
+        k) stop_only=1 ;;
         *) usage ;;
     esac
 done
@@ -28,25 +46,69 @@ done
 shift $((OPTIND - 1))
 
 case "$mode" in
-    stretch|fill|fit|center|tile|solid_color) ;;
-    *) echo "error: invalid mode: $mode"; exit 1 ;;
+    fill)    resize="crop" ;;
+    fit)     resize="fit" ;;
+    stretch) resize="stretch" ;;
+    center)  resize="no" ;;
+    *) echo "error: invalid mode: $mode (use fill|fit|stretch|center)"; exit 1 ;;
 esac
 
 [[ "$interval" =~ ^-?[0-9]+$ ]] || { echo "error: invalid interval: $interval"; exit 1; }
 
-# stop any rotation loop left over from a previous run
+command -v awww >/dev/null 2>&1 && command -v awww-daemon >/dev/null 2>&1 || {
+    echo "error: awww is not installed (pacman -S awww)"; exit 1
+}
+
+ensure_daemon() {
+    awww query >/dev/null 2>&1 && return
+    awww-daemon >/dev/null 2>&1 &
+    disown
+    for _ in $(seq 1 50); do
+        awww query >/dev/null 2>&1 && return
+        sleep 0.1
+    done
+    echo "error: awww-daemon did not start" >&2
+    exit 1
+}
+
+# Start the daemon (if needed) before touching the lock below: it's a long-lived
+# process, and if it were started while the lock fd was open it would inherit and
+# hold that fd forever, wedging every future invocation's flock.
+[ "$stop_only" -eq 1 ] || ensure_daemon
+
+# Serialize stop-old/start-new so two invocations racing at once (e.g. an autostart
+# hook firing alongside a keybind press) can't both end up with a rotation loop.
+exec {lockfd}>"$lockfile"
+flock "$lockfd"
+
+# Stop any rotation loop left over from a previous run. The loop was backgrounded as
+# its own process group (via `set -m`), so signaling the negative pid also kills its
+# `sleep` child immediately instead of leaving it to run out orphaned.
 if [ -f "$pidfile" ]; then
-    oldpid="$(cat "$pidfile" 2>/dev/null || true)"
-    [ -n "$oldpid" ] && kill "$oldpid" 2>/dev/null || true
+    oldpgid="$(cat "$pidfile" 2>/dev/null || true)"
+    [ -n "$oldpgid" ] && kill -TERM -- "-$oldpgid" 2>/dev/null || true
     rm -f "$pidfile"
 fi
+
+if [ "$stop_only" -eq 1 ]; then
+    exit 0
+fi
+
+set_image() {
+    awww img "$1" \
+        --resize "$resize" \
+        --transition-type "$ttype" \
+        --transition-duration "$tduration" \
+        --transition-fps "$tfps" \
+        >/dev/null 2>&1 || true
+}
 
 set_random() {
     [ -d "$randir" ] || { echo "error: not a directory: $randir"; exit 1; }
 
     exts=(-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o \
           -iname '*.bmp' -o -iname '*.tiff' -o -iname '*.tif' -o -iname '*.webp' -o \
-          -iname '*.svg' -o -iname '*.avif')
+          -iname '*.avif')
 
     imgs=()
     while IFS= read -r -d '' img; do
@@ -54,11 +116,7 @@ set_random() {
     done < <(find "$randir" -type f \( "${exts[@]}" \) -print0 2>/dev/null)
 
     [ "${#imgs[@]}" -gt 0 ] || { echo "error: no images found in $randir"; exit 1; }
-    img="${imgs[RANDOM % ${#imgs[@]}]}"
-
-    pkill swaybg 2>/dev/null || true
-    swaybg -i "$img" -m "$mode" &
-    disown $!
+    set_image "${imgs[RANDOM % ${#imgs[@]}]}"
 }
 
 if [ -n "$randir" ]; then
@@ -67,21 +125,25 @@ if [ -n "$randir" ]; then
     set_random
 
     if [ "$interval" -gt 0 ]; then
+        set -m
         (
+            # Drop our inherited copy of the lock fd immediately: otherwise this
+            # long-lived loop holds the lock open forever and every future
+            # invocation of this script blocks on flock indefinitely.
+            exec {lockfd}>&-
             while true; do
                 sleep "$interval"
                 set_random
             done
         ) &
         echo $! > "$pidfile"
-        disown $!
+        disown
+        set +m
     fi
 else
     img="${1:-}"
     [ -n "$img" ] || usage
     [ -f "$img" ] || { echo "error: file not found: $img"; exit 1; }
 
-    pkill swaybg 2>/dev/null || true
-    swaybg -i "$img" -m "$mode" &
-    disown $!
+    set_image "$img"
 fi

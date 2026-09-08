@@ -1,0 +1,35 @@
+name: Update Wallpaper Gallery
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'walls/**'
+      - '.github/scripts/generate_gallery.sh'
+      - '.github/workflows/gallery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  gallery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate gallery
+        run: .github/scripts/generate_gallery.sh
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- GALLERY.md; then
+            echo "No changes to GALLERY.md"
+            exit 0
+          fi
+          git add GALLERY.md
+          git commit -m "chore: update wallpaper gallery [skip ci]"
+          git push

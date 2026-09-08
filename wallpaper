@@ -4,19 +4,23 @@ set -euo pipefail
 
 mode="fill"
 randir=""
+interval=60
+pidfile="${XDG_RUNTIME_DIR:-/tmp}/wallpaper-rotate.pid"
 
 usage() {
-    echo "usage: $0 [-m mode] [-r <dir>] [<image>]"
-    echo "  -m mode   stretch|fill|fit|center|tile|solid_color (default: fill)"
-    echo "  -r <dir>  pick random image from directory (recursive)"
-    echo "  <image>   path to image file"
+    echo "usage: $0 [-m mode] [-r <dir>] [-t <seconds>] [<image>]"
+    echo "  -m mode      stretch|fill|fit|center|tile|solid_color (default: fill)"
+    echo "  -r <dir>     rotate through random images from directory (recursive)"
+    echo "  -t <seconds> rotation interval (default: 60; <= 0 disables rotation, sets once)"
+    echo "  <image>      path to image file"
     exit 1
 }
 
-while getopts "m:r:h" opt; do
+while getopts "m:r:t:h" opt; do
     case $opt in
         m) mode="$OPTARG" ;;
         r) randir="$OPTARG" ;;
+        t) interval="$OPTARG" ;;
         *) usage ;;
     esac
 done
@@ -28,9 +32,17 @@ case "$mode" in
     *) echo "error: invalid mode: $mode"; exit 1 ;;
 esac
 
-if [ -n "$randir" ]; then
+[[ "$interval" =~ ^-?[0-9]+$ ]] || { echo "error: invalid interval: $interval"; exit 1; }
+
+# stop any rotation loop left over from a previous run
+if [ -f "$pidfile" ]; then
+    oldpid="$(cat "$pidfile" 2>/dev/null || true)"
+    [ -n "$oldpid" ] && kill "$oldpid" 2>/dev/null || true
+    rm -f "$pidfile"
+fi
+
+set_random() {
     [ -d "$randir" ] || { echo "error: not a directory: $randir"; exit 1; }
-    [ $# -eq 0 ] || { echo "error: cannot use -r and a file argument together"; exit 1; }
 
     exts=(-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o \
           -iname '*.bmp' -o -iname '*.tiff' -o -iname '*.tif' -o -iname '*.webp' -o \
@@ -43,12 +55,33 @@ if [ -n "$randir" ]; then
 
     [ "${#imgs[@]}" -gt 0 ] || { echo "error: no images found in $randir"; exit 1; }
     img="${imgs[RANDOM % ${#imgs[@]}]}"
+
+    pkill swaybg 2>/dev/null || true
+    swaybg -i "$img" -m "$mode" &
+    disown $!
+}
+
+if [ -n "$randir" ]; then
+    [ $# -eq 0 ] || { echo "error: cannot use -r and a file argument together"; exit 1; }
+
+    set_random
+
+    if [ "$interval" -gt 0 ]; then
+        (
+            while true; do
+                sleep "$interval"
+                set_random
+            done
+        ) &
+        echo $! > "$pidfile"
+        disown $!
+    fi
 else
     img="${1:-}"
     [ -n "$img" ] || usage
     [ -f "$img" ] || { echo "error: file not found: $img"; exit 1; }
-fi
 
-pkill swaybg 2>/dev/null || true
-swaybg -i "$img" -m "$mode" &
-disown $!
+    pkill swaybg 2>/dev/null || true
+    swaybg -i "$img" -m "$mode" &
+    disown $!
+fi
